@@ -1,0 +1,21 @@
+# Core dependencies (required)
+opencv-python==4.8.1.78
+numpy==1.24.3
+mediapipe==0.10.9
+
+# Model inference dependencies (choose based on your model format)
+# Uncomment the one you need:
+
+# For Keras/TensorFlow models (.h5)
+# tensorflow==2.15.0
+# or tensorflow-cpu==2.15.0  # CPU-only, faster install
+
+# For ONNX models (.onnx) - RECOMMENDED for edge deployment
+# onnxruntime==1.16.3
+
+# For PyTorch models (.pth)
+# torch==2.1.0
+# torchvision==0.16.0
+
+# Optional: Alternative face detectors
+# mtcnn==0.1.1  # Requires tensorflow
