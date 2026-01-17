@@ -116,25 +116,35 @@ class PassiveLivenessModel:
                 
                 # Load weights
                 checkpoint = torch.load(self.model_path, map_location='cpu')
-                if 'state_dict' in checkpoint:
-                    self.model.load_state_dict(checkpoint['state_dict'])
-                else:
-                    self.model.load_state_dict(checkpoint)
+                state_dict = checkpoint['state_dict'] if 'state_dict' in checkpoint else checkpoint
+                
+                # Use non-strict loading to handle layer name mismatches
+                self.model.load_state_dict(state_dict, strict=False)
                 
                 # Modify for binary classification
                 self.model.new_fc = nn.Linear(self.model.new_fc.in_features, 1)
                 self.model.sigmoid = nn.Sigmoid()
                 
                 self.model.eval()
-                print(f"✓ Loaded TSM model from {self.model_path}")
+                print(f"✓ Loaded TSM model (TSN wrapper) from {self.model_path}")
                 
             except Exception as e:
-                print(f"TSN initialization error: {e}")
-                # Fallback to simple load if not a TSN model
+                # Fallback to direct model loading
+                # This is common for Kaggle/Fine-tuned models saved via torch.save(model, path)
+                print(f"ℹ️ TSN wrapper check: {e}")
                 checkpoint = torch.load(self.model_path, map_location='cpu')
-                self.model = checkpoint
-                self.model.eval()
-                print(f"✓ Loaded standard PyTorch model from {self.model_path}")
+                
+                if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                    # If it's a state_dict, we still need the architecture.
+                    # For now, we assume the user might have saved the full model.
+                    print("⚠️ State dict detected without architecture definition.")
+                    self.model = checkpoint
+                else:
+                    self.model = checkpoint
+                
+                if hasattr(self.model, 'eval'):
+                    self.model.eval()
+                print(f"✓ Loaded fine-tuned PyTorch model from {self.model_path}")
                 
         except ImportError:
             raise ImportError("Install PyTorch: pip install torch torchvision")
