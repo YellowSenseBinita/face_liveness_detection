@@ -192,11 +192,6 @@ class ActiveLivenessDetector:
         logger.info(f"Challenge started: {instruction}")
         
         while (blink_count < num_blinks_required if challenge_type == 'blink' else mouth_open_count < 1):
-            if time.time() - start_time > timeout:
-                cap.release()
-                cv2.destroyAllWindows()
-                return False, f"Timeout: Challenge failed"
-            
             ret, frame = cap.read()
             if not ret:
                 break
@@ -299,11 +294,6 @@ class ActiveLivenessDetector:
         print("Look at the camera naturally and blink...")
         
         while blink_count < num_blinks_required:
-            if time.time() - start_time > timeout:
-                cap.release()
-                cv2.destroyAllWindows()
-                return False, f"Timeout: Challenge failed"
-            
             ret, frame = cap.read()
             if not ret:
                 break
@@ -386,10 +376,6 @@ class ActiveLivenessDetector:
         logger.info(f"Challenge started: Please blink {num_blinks_required} times")
         
         while blink_count < num_blinks_required:
-            if time.time() - start_time > timeout:
-                cap.release()
-                return False, f"Timeout: Challenge failed"
-            
             ret, frame = cap.read()
             if not ret:
                 break

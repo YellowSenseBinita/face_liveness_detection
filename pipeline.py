@@ -108,6 +108,31 @@ class LivenessDetectionWithUI:
             consec_frames=self.config.EAR_CONSEC_FRAMES
         )
     
+    def is_face_aligned(self, face_box, guide_box, tolerance=0.15):
+        """Check if face is properly centered within the guide box"""
+        if face_box is None: return False
+        
+        fx, fy, fw, fh = face_box
+        gx, gy, gw, gh = guide_box
+        
+        # Calculate centers
+        face_center_x = fx + fw / 2
+        face_center_y = fy + fh / 2
+        guide_center_x = gx + gw / 2
+        guide_center_y = gy + gh / 2
+        
+        # Distance between centers normalized by guide box size
+        dist_x = abs(face_center_x - guide_center_x) / gw
+        dist_y = abs(face_center_y - guide_center_y) / gh
+        
+        # Size similarity (face should fill about 60-90% of guide box height)
+        size_ratio = fh / gh
+        
+        is_centered = dist_x < tolerance and dist_y < tolerance
+        is_sized = 0.5 < size_ratio < 1.0
+        
+        return is_centered and is_sized
+
     def draw_ui_overlay(self, frame, info):
         """Draw complete UI overlay"""
         h, w = frame.shape[:2]
@@ -154,11 +179,17 @@ class LivenessDetectionWithUI:
         # Guide box
         box_w, box_h = int(w * 0.4), int(h * 0.5)
         box_x, box_y = (w - box_w) // 2, (h - box_h) // 2 + 50
+        guide_box = (box_x, box_y, box_w, box_h)
+        
+        is_aligned = info.get('is_aligned', False)
+        box_color = (0, 255, 0) if is_aligned else (100, 200, 255)
         
         cv2.rectangle(display, (box_x, box_y), (box_x + box_w, box_y + box_h), 
-                     (100, 200, 255), 2)
-        cv2.putText(display, "Place face here", 
-                   (box_x, box_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 200, 255), 2)
+                     box_color, 2)
+        
+        box_text = "ALIGNED ✓" if is_aligned else "Place face here"
+        cv2.putText(display, box_text, 
+                   (box_x, box_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, box_color, 2)
         
         # Result indicator
         if score > 0:
@@ -244,20 +275,37 @@ class LivenessDetectionWithUI:
                 elapsed = time.time() - phase_start
                 ui_info = {'face_detected': face_detected, 'score': current_score, 'frame_count': len(frames)}
                 
+                # Define guide box for alignment check
+                box_w, box_h = int(w * 0.4), int(h * 0.5)
+                box_x, box_y = (w - box_w) // 2, (h - box_h) // 2 + 50
+                guide_box = (box_x, box_y, box_w, box_h)
+                
+                is_aligned = self.is_face_aligned(box, guide_box)
+                ui_info['is_aligned'] = is_aligned
+                
                 if phase == "ALIGNMENT":
-                    ui_info['instruction'] = "ALIGNMENT: Place your face in the center box"
-                    ui_info['progress'] = min(1.0, elapsed / self.config.WARMUP_DURATION)
-                    if face_detected and elapsed >= 1.0: # Wait at least 1s for stability
+                    ui_info['instruction'] = "ALIGNMENT: Center your face in the box"
+                    # In alignment phase, progress bar isn't needed or could show "stability"
+                    ui_info['progress'] = 0.0
+                    
+                    if is_aligned:
+                        # Success! Move to scanning
                         phase = "SCANNING"
                         phase_start = time.time()
-                        logger.info("→ Starting passive scan...")
+                        logger.info("→ Face aligned correctly. Starting passive scan...")
                 
                 elif phase == "SCANNING":
-                    ui_info['instruction'] = "SCANNING: Hold still... Analyzing liveness"
-                    ui_info['progress'] = elapsed / self.config.ANALYSIS_DURATION
-                    if elapsed >= self.config.ANALYSIS_DURATION:
-                        phase = "ANALYZING"
+                    if not is_aligned:
+                        ui_info['instruction'] = "⚠️ KEEP FACE CENTERED: Re-aligning..."
                         phase_start = time.time()
+                        face_crops = [] # Reset crops to ensure contiguous high-quality sequence
+                        ui_info['progress'] = 0.0
+                    else:
+                        ui_info['instruction'] = "SCANNING: Hold still... Analyzing liveness"
+                        ui_info['progress'] = min(1.0, elapsed / self.config.ANALYSIS_DURATION)
+                        if elapsed >= self.config.ANALYSIS_DURATION:
+                            phase = "ANALYZING"
+                            phase_start = time.time()
                     
                     # Periodic mid-scan inference
                     if len(face_crops) >= self.config.NUM_FRAMES and len(frames) % 15 == 0:
