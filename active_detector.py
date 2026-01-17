@@ -7,7 +7,12 @@ Supports multiple backends: MediaPipe (preferred), dlib, OpenCV (fallback)
 import cv2
 import numpy as np
 import time
-from typing import Tuple
+import logging
+import sys
+from typing import Tuple, List
+
+# Configure logging
+logger = logging.getLogger("ActiveDetector")
 
 
 class ActiveLivenessDetector:
@@ -16,15 +21,17 @@ class ActiveLivenessDetector:
     Uses Eye Aspect Ratio (EAR) method with facial landmarks
     """
     
-    def __init__(self, ear_threshold: float = 0.21, consec_frames: int = 3):
+    def __init__(self, ear_threshold: float = 0.21, mar_threshold: float = 0.35, consec_frames: int = 3):
         """
         Initialize active detector
         
         Args:
             ear_threshold: EAR value below which eye is considered closed
-            consec_frames: Number of consecutive frames for valid blink
+            mar_threshold: MAR value above which mouth is considered open
+            consec_frames: Number of consecutive frames for valid blink/action
         """
         self.ear_threshold = ear_threshold
+        self.mar_threshold = mar_threshold
         self.consec_frames = consec_frames
         self.use_mediapipe = False
         self.use_dlib = False
@@ -43,12 +50,12 @@ class ActiveLivenessDetector:
                     min_tracking_confidence=0.5
                 )
                 self.use_mediapipe = True
-                print("✓ Active liveness initialized: Blink detection (MediaPipe)")
+                logger.info("✓ Active liveness initialized: Blink detection (MediaPipe)")
                 return
             else:
                 raise AttributeError("MediaPipe solutions not available")
         except (ImportError, AttributeError) as e:
-            print(f"⚠️  MediaPipe not available: {e}")
+            logger.warning(f"MediaPipe not available: {e}")
         
         # Try dlib as fallback (good accuracy)
         try:
@@ -58,12 +65,12 @@ class ActiveLivenessDetector:
             try:
                 self.predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
                 self.use_dlib = True
-                print("✓ Active liveness initialized: Blink detection (dlib)")
+                logger.info("✓ Active liveness initialized: Blink detection (dlib)")
                 return
             except:
-                print("⚠️  dlib landmark file not found (need shape_predictor_68_face_landmarks.dat)")
+                logger.warning("dlib landmark file not found (need shape_predictor_68_face_landmarks.dat)")
         except ImportError:
-            print("⚠️  dlib not available")
+            logger.warning("dlib not available")
         
         # Use OpenCV as final fallback (basic but works)
         try:
@@ -77,9 +84,9 @@ class ActiveLivenessDetector:
                 raise RuntimeError("Failed to load Haar cascades")
             
             self.use_opencv = True
-            print("✓ Active liveness initialized: Blink detection (OpenCV fallback)")
+            logger.info("✓ Active liveness initialized: Blink detection (OpenCV fallback)")
         except Exception as e:
-            print(f"❌ Failed to initialize any blink detector: {e}")
+            logger.error(f"Failed to initialize any blink detector: {e}")
             raise RuntimeError("No blink detection method available")
     
     def calculate_ear(self, eye_landmarks: np.ndarray) -> float:
@@ -104,6 +111,25 @@ class ActiveLivenessDetector:
         # EAR formula
         ear = (A + B) / (2.0 * C + 1e-6)  # Add epsilon to avoid division by zero
         return ear
+    
+    def calculate_mar(self, mouth_landmarks: np.ndarray) -> float:
+        """
+        Calculate Mouth Aspect Ratio (MAR)
+        
+        Args:
+            mouth_landmarks: Array of (x,y) points for mouth
+            Expects [top_lip, bottom_lip, left_corner, right_corner]
+            
+        Returns:
+            MAR value
+        """
+        # Vertical distance between lips
+        A = np.linalg.norm(mouth_landmarks[0] - mouth_landmarks[1])
+        # Horizontal distance between corners
+        B = np.linalg.norm(mouth_landmarks[2] - mouth_landmarks[3])
+        
+        mar = A / (B + 1e-6)
+        return mar
     
     def get_eye_landmarks(self, face_landmarks, eye_indices: list, h: int, w: int) -> np.ndarray:
         """Extract eye landmark coordinates from MediaPipe"""
@@ -146,21 +172,30 @@ class ActiveLivenessDetector:
         # MediaPipe eye landmark indices
         LEFT_EYE = [362, 385, 387, 263, 373, 380]
         RIGHT_EYE = [33, 160, 158, 133, 153, 144]
+        MOUTH = [13, 14, 78, 308] # Top, Bottom, Left, Right
         
         blink_count = 0
+        mouth_open_count = 0
         closed_frames = 0
+        mouth_open_frames = 0
         was_open = True
+        mouth_was_closed = True
+        
+        # Randomly choose a challenge (or do both)
+        challenge_type = np.random.choice(['blink', 'mouth'])
+        target_count = num_blinks_required if challenge_type == 'blink' else 1
         
         start_time = time.time()
         last_print = 0
         
-        print(f"\n👁️  Please blink {num_blinks_required} times")
-        print("Look at the camera naturally and blink...")
+        instruction = f"Please blink {num_blinks_required} times" if challenge_type == 'blink' else "Please open your mouth"
+        logger.info(f"Challenge started: {instruction}")
         
-        while blink_count < num_blinks_required:
+        while (blink_count < num_blinks_required if challenge_type == 'blink' else mouth_open_count < 1):
             if time.time() - start_time > timeout:
                 cap.release()
-                return False, f"Timeout: Only {blink_count}/{num_blinks_required} blinks detected"
+                cv2.destroyAllWindows()
+                return False, f"Timeout: Challenge failed"
             
             ret, frame = cap.read()
             if not ret:
@@ -176,53 +211,73 @@ class ActiveLivenessDetector:
             if results.multi_face_landmarks:
                 face_landmarks = results.multi_face_landmarks[0]
                 
-                # Get eye landmarks
-                left_eye = self.get_eye_landmarks(face_landmarks, LEFT_EYE, h, w)
-                right_eye = self.get_eye_landmarks(face_landmarks, RIGHT_EYE, h, w)
+                # DRAW UI
+                cv2.rectangle(frame, (0, h - 60), (w, h), (0, 0, 0), -1)
+                cv2.putText(frame, instruction, (w // 2 - 150, h - 20), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
                 
-                # Calculate EAR for both eyes
-                left_ear = self.calculate_ear(left_eye)
-                right_ear = self.calculate_ear(right_eye)
-                avg_ear = (left_ear + right_ear) / 2.0
+                if challenge_type == 'blink':
+                    # Get eye landmarks
+                    left_eye = self.get_eye_landmarks(face_landmarks, LEFT_EYE, h, w)
+                    right_eye = self.get_eye_landmarks(face_landmarks, RIGHT_EYE, h, w)
+                    
+                    # Calculate EAR for both eyes
+                    left_ear = self.calculate_ear(left_eye)
+                    right_ear = self.calculate_ear(right_eye)
+                    avg_ear = (left_ear + right_ear) / 2.0
+                    
+                    # Check if eyes are closed
+                    if avg_ear < self.ear_threshold:
+                        closed_frames += 1
+                    else:
+                        # Eyes opened again after being closed
+                        if closed_frames >= self.consec_frames and not was_open:
+                            blink_count += 1
+                            logger.info(f"Blink {blink_count} detected!")
+                            was_open = True
+                        closed_frames = 0
+                        if closed_frames == 0:
+                            was_open = True
+                    
+                    if closed_frames >= self.consec_frames:
+                        was_open = False
+                        
+                    cv2.putText(frame, f"Blinks: {blink_count}/{num_blinks_required}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
                 
-                # Check if eyes are closed
-                if avg_ear < self.ear_threshold:
-                    closed_frames += 1
-                else:
-                    # Eyes opened again after being closed
-                    if closed_frames >= self.consec_frames and not was_open:
-                        blink_count += 1
-                        print(f"✓ Blink {blink_count} detected!")
-                        was_open = True
-                    closed_frames = 0
-                    if closed_frames == 0:
-                        was_open = True
-                
-                # Update state
-                if closed_frames >= self.consec_frames:
-                    was_open = False
-                
-                # Print progress every 1 second
-                elapsed = time.time() - start_time
-                if elapsed - last_print >= 1.0:
-                    time_left = timeout - elapsed
-                    print(f"  Blinks: {blink_count}/{num_blinks_required} | EAR: {avg_ear:.3f} | Time left: {time_left:.1f}s", end='\r')
-                    last_print = elapsed
+                elif challenge_type == 'mouth':
+                    # Get mouth landmarks
+                    mouth_pts = self.get_eye_landmarks(face_landmarks, MOUTH, h, w)
+                    mar = self.calculate_mar(mouth_pts)
+                    
+                    if mar > self.mar_threshold:
+                        mouth_open_frames += 1
+                    else:
+                        if mouth_open_frames >= self.consec_frames and not mouth_was_closed:
+                            mouth_open_count += 1
+                            logger.info("Mouth open detected!")
+                            mouth_was_closed = True
+                        mouth_open_frames = 0
+                        if mouth_open_frames == 0:
+                            mouth_was_closed = True
+                    
+                    if mouth_open_frames >= self.consec_frames:
+                        mouth_was_closed = False
+                    
+                    cv2.putText(frame, "Mouth detection active", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                cv2.imshow('Active Liveness Challenge', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
             else:
-                # Print no face warning
-                elapsed = time.time() - start_time
-                if elapsed - last_print >= 1.0:
-                    print(f"  No face detected - please look at camera", end='\r')
-                    last_print = elapsed
+                cv2.imshow('Active Liveness Challenge', frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
         
         cap.release()
+        cv2.destroyAllWindows()
         
-        print()  # New line after progress
-        
-        if blink_count >= num_blinks_required:
-            return True, f"Success: {blink_count} blinks detected"
-        else:
-            return False, f"Failed: Only {blink_count}/{num_blinks_required} blinks"
+        success = (blink_count >= num_blinks_required if challenge_type == 'blink' else mouth_open_count >= 1)
+        return success, "Challenge successful" if success else "Challenge failed"
     
     def _detect_blinks_dlib(self, num_blinks_required: int, timeout: float) -> Tuple[bool, str]:
         """dlib-based blink detection using 68 facial landmarks"""
@@ -247,7 +302,7 @@ class ActiveLivenessDetector:
             if time.time() - start_time > timeout:
                 cap.release()
                 cv2.destroyAllWindows()
-                return False, f"Timeout: Only {blink_count}/{num_blinks_required} blinks detected"
+                return False, f"Timeout: Challenge failed"
             
             ret, frame = cap.read()
             if not ret:
@@ -280,7 +335,7 @@ class ActiveLivenessDetector:
                 else:
                     if closed_frames >= self.consec_frames and not was_open:
                         blink_count += 1
-                        print(f"✓ Blink {blink_count} detected!")
+                        logger.info(f"Blink {blink_count} detected!")
                         was_open = True
                     closed_frames = 0
                     if closed_frames == 0:
@@ -328,13 +383,12 @@ class ActiveLivenessDetector:
         start_time = time.time()
         last_print = 0
         
-        print(f"\n👁️  Please blink {num_blinks_required} times")
-        print("Look at the camera and blink naturally...")
+        logger.info(f"Challenge started: Please blink {num_blinks_required} times")
         
         while blink_count < num_blinks_required:
             if time.time() - start_time > timeout:
                 cap.release()
-                return False, f"Timeout: Only {blink_count}/{num_blinks_required} blinks detected"
+                return False, f"Timeout: Challenge failed"
             
             ret, frame = cap.read()
             if not ret:
@@ -363,21 +417,19 @@ class ActiveLivenessDetector:
             else:
                 if closed_frames >= self.consec_frames:
                     blink_count += 1
-                    print(f"✓ Blink {blink_count} detected!")
+                    logger.info(f"Blink {blink_count} detected!")
                 closed_frames = 0
             
             prev_eyes = num_eyes
             
             # Print progress every 1 second
             elapsed = time.time() - start_time
-            if elapsed - last_print >= 1.0:
-                time_left = timeout - elapsed
-                print(f"  Blinks: {blink_count}/{num_blinks_required} | Eyes: {num_eyes} | Time left: {time_left:.1f}s", end='\r')
-                last_print = elapsed
+            time_left = timeout - elapsed
+            logger.debug(f"Blinks: {blink_count}/{num_blinks_required} | Eyes: {num_eyes} | Time left: {time_left:.1f}s")
+            last_print = elapsed
         
         cap.release()
         
-        print()  # New line after progress
         
         if blink_count >= num_blinks_required:
             return True, f"Success: {blink_count} blinks detected"

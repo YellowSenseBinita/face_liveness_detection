@@ -7,13 +7,24 @@ import cv2
 import numpy as np
 import time
 import sys
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("LivenessPipeline")
 
 # Test if UI is available
 def test_ui_support():
     """Test if OpenCV UI is available"""
-    print("\n" + "="*70)
-    print("TESTING UI SUPPORT")
-    print("="*70)
+    logger.info("="*70)
+    logger.info("TESTING UI SUPPORT")
+    logger.info("="*70)
     
     try:
         # Create a small test window
@@ -25,20 +36,20 @@ def test_ui_support():
         cv2.waitKey(1000)
         cv2.destroyAllWindows()
         
-        print("✅ UI Support: AVAILABLE")
-        print("   Windows will be displayed during detection")
+        logger.info("✅ UI Support: AVAILABLE")
+        logger.info("   Windows will be displayed during detection")
         return True
         
     except cv2.error as e:
-        print("❌ UI Support: NOT AVAILABLE")
-        print(f"   Error: {e}")
-        print("\n💡 Solutions:")
-        print("   1. Install: pip uninstall opencv-python")
-        print("              pip install opencv-contrib-python")
-        print("   2. Or use headless mode (no UI)")
+        logger.error("❌ UI Support: NOT AVAILABLE")
+        logger.error(f"   Error: {e}")
+        logger.info("\n💡 Solutions:")
+        logger.info("   1. Install: pip uninstall opencv-python")
+        logger.info("              pip install opencv-contrib-python")
+        logger.info("   2. Or use headless mode (no UI)")
         return False
     except Exception as e:
-        print(f"❌ Unexpected error: {e}")
+        logger.error(f"❌ Unexpected error: {e}")
         return False
 
 
@@ -47,17 +58,17 @@ if __name__ == "__main__":
     has_ui = test_ui_support()
     
     if not has_ui:
-        print("\n" + "="*70)
-        print("⚠️  WARNING: UI not available")
-        print("="*70)
+        logger.warning("="*70)
+        logger.warning("⚠️  WARNING: UI not available")
+        logger.warning("="*70)
         response = input("\nContinue without UI? (y/n): ")
         if response.lower() != 'y':
-            print("Exiting...")
+            logger.info("Exiting...")
             sys.exit(0)
     
-    print("\n" + "="*70)
-    print("STARTING LIVENESS DETECTION WITH UI")
-    print("="*70)
+    logger.info("="*70)
+    logger.info("STARTING LIVENESS DETECTION WITH UI")
+    logger.info("="*70)
 
 
 from config import Config
@@ -93,6 +104,7 @@ class LivenessDetectionWithUI:
         
         self.active_detector = ActiveLivenessDetector(
             ear_threshold=self.config.BLINK_EAR_THRESHOLD,
+            mar_threshold=self.config.MOUTH_MAR_THRESHOLD,
             consec_frames=self.config.EAR_CONSEC_FRAMES
         )
     
@@ -166,147 +178,157 @@ class LivenessDetectionWithUI:
         cv2.putText(display, f"Frames: {info.get('frame_count', 0)}", 
                    (w - 150, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
         
+        # Instruction text (new)
+        instruction = info.get('instruction', 'Please wait...')
+        if instruction:
+            # Draw a banner for instruction
+            cv2.rectangle(display, (0, h - 80), (w, h), (0, 0, 0), -1)
+            cv2.putText(display, instruction, 
+                       (20, h - 45), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            
+            # Progress bar if applicable
+            if 'progress' in info:
+                prog = info['progress']
+                cv2.rectangle(display, (0, h - 10), (int(w * prog), h), (0, 255, 255), -1)
+        
         return display
     
     def run_with_ui(self):
-        """Run detection with full UI"""
-        print("\n📹 Opening camera...")
+        """Run detection with multi-phase UI pipeline"""
+        logger.info("📹 Opening camera...")
         
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            print("❌ Cannot open camera")
+            logger.error("❌ Cannot open camera")
             return None
         
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.CAMERA_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.CAMERA_HEIGHT)
         
-        print("✅ Camera opened - UI window will appear")
-        print("→ Look at the camera for 2 seconds")
-        print("→ Press 'q' to quit\n")
+        logger.info("✅ Camera ready")
         
         frames = []
         face_crops = []
         current_score = 0.0
-        start_time = time.time()
-        last_inference = 0
+        
+        # UI State Control
+        phase = "ALIGNMENT"
+        phase_start = time.time()
         
         try:
-            while (time.time() - start_time) < 2.0:
+            while True:
                 ret, frame = cap.read()
-                if not ret:
-                    break
-                
+                if not ret: break
                 frame = cv2.flip(frame, 1)
-                frames.append(frame.copy())
+                h, w = frame.shape[:2]
                 
-                # Detect face
+                # Face Detection (Common for all phases)
                 faces = self.face_detector.detect(frame)
                 face_detected = len(faces) > 0
+                box = None
                 
                 if face_detected:
                     largest = max(faces, key=lambda f: f['box'][2] * f['box'][3])
-                    x, y, w, h = largest['box']
+                    x, y, fw, fh = largest['box']
+                    box = (x, y, fw, fh)
+                    cv2.rectangle(frame, (x, y), (x+fw, y+fh), (0, 255, 0), 2)
                     
-                    # Draw face box on frame
-                    cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 3)
-                    
-                    # Crop face
+                    # Crop face for analysis
                     pad = 20
-                    x1 = max(0, x - pad)
-                    y1 = max(0, y - pad)
-                    x2 = min(frame.shape[1], x + w + pad)
-                    y2 = min(frame.shape[0], y + h + pad)
-                    crop = frame[y1:y2, x1:x2]
-                    
-                    if crop.size > 0:
+                    crop = frame[max(0, y-pad):min(h, y+fh+pad), max(0, x-pad):min(w, x+fw+pad)]
+                    if crop.size > 0 and phase == "SCANNING":
                         face_crops.append(crop)
                 
-                # Run inference periodically
-                elapsed = time.time() - start_time
-                if elapsed - last_inference >= 0.5 and len(face_crops) >= 8:
-                    try:
-                        stacked = self.frame_processor.process_sequence(face_crops[-16:])
-                        current_score = self.passive_model.predict(stacked)
-                        last_inference = elapsed
-                        print(f"  Live score: {current_score:.3f}", end='\r')
-                    except:
-                        pass
+                # --- PHASE LOGIC ---
+                elapsed = time.time() - phase_start
+                ui_info = {'face_detected': face_detected, 'score': current_score, 'frame_count': len(frames)}
                 
-                # Draw UI
-                ui_info = {
-                    'face_detected': face_detected,
-                    'score': current_score,
-                    'frame_count': len(frames)
-                }
+                if phase == "ALIGNMENT":
+                    ui_info['instruction'] = "ALIGNMENT: Place your face in the center box"
+                    ui_info['progress'] = min(1.0, elapsed / self.config.WARMUP_DURATION)
+                    if face_detected and elapsed >= 1.0: # Wait at least 1s for stability
+                        phase = "SCANNING"
+                        phase_start = time.time()
+                        logger.info("→ Starting passive scan...")
+                
+                elif phase == "SCANNING":
+                    ui_info['instruction'] = "SCANNING: Hold still... Analyzing liveness"
+                    ui_info['progress'] = elapsed / self.config.ANALYSIS_DURATION
+                    if elapsed >= self.config.ANALYSIS_DURATION:
+                        phase = "ANALYZING"
+                        phase_start = time.time()
+                    
+                    # Periodic mid-scan inference
+                    if len(face_crops) >= self.config.NUM_FRAMES and len(frames) % 15 == 0:
+                        try:
+                            stacked = self.frame_processor.process_sequence(face_crops[-self.config.NUM_FRAMES:])
+                            current_score = self.passive_model.predict(stacked)
+                        except: pass
+                
+                elif phase == "ANALYZING":
+                    ui_info['instruction'] = "ANALYZING: Processing results..."
+                    if elapsed >= 1.0: break # Exit loop to run final inference
+                
+                # Draw and Show
                 display = self.draw_ui_overlay(frame, ui_info)
+                cv2.imshow('Liveness Detection', display)
+                frames.append(frame.copy())
                 
-                # SHOW WINDOW
-                cv2.imshow('Liveness Detection - LIVE VIEW', display)
+                if cv2.waitKey(1) & 0xFF == ord('q'): return None
+
+            # --- FINAL PASSIVE ANALYSIS ---
+            if not face_crops:
+                return {'success': False, 'decision': 'ERROR', 'passive_score': 0.0}
                 
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    print("\n\n⚠️  Quit by user")
-                    break
+            logger.info("🤖 Running final passive inference...")
+            stacked = self.frame_processor.process_sequence(face_crops)
+            final_score = self.passive_model.predict(stacked)
+            logger.info(f"✅ Final score: {final_score:.4f}")
             
-            print(f"\n\n✅ Capture complete - {len(frames)} frames captured")
+            # --- DECISION & TRANSITION ---
+            result = {'passive_score': final_score, 'active_triggered': False, 'success': False, 'decision': None}
             
-            # Show final frame for 2 seconds
-            if len(frames) > 0:
-                final_display = self.draw_ui_overlay(frames[-1], ui_info)
-                cv2.putText(final_display, "ANALYZING...", 
-                           (final_display.shape[1]//2 - 150, final_display.shape[0]//2), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
-                cv2.imshow('Liveness Detection - LIVE VIEW', final_display)
-                cv2.waitKey(2000)
+            if final_score >= self.config.HIGH_CONFIDENCE_THRESHOLD:
+                result.update({'success': True, 'decision': 'LIVE'})
+                logger.info("✅ RESULT: LIVE (High Confidence)")
+            else:
+                # Need Active Liveness or Passive check passed but low confidence
+                if final_score < self.config.PASSIVE_THRESHOLD:
+                    logger.info("⚠️  Passive check failed. Delaying for active challenge...")
+                else:
+                    logger.info("📝 Passive check borderline. Verifying with active challenge...")
+                
+                # PREPARATION PHASE (GET READY)
+                prep_start = time.time()
+                while time.time() - prep_start < self.config.PREPARATION_DELAY:
+                    ret, frame = cap.read()
+                    if not ret: break
+                    frame = cv2.flip(frame, 1)
+                    info = {'instruction': "GET READY: Challenge starting in {}s...".format(int(self.config.PREPARATION_DELAY - (time.time() - prep_start)) + 1), 'face_detected': True, 'score': final_score}
+                    cv2.imshow('Liveness Detection', self.draw_ui_overlay(frame, info))
+                    if cv2.waitKey(1) & 0xFF == ord('q'): return None
+
+                # ACTIVE CHALLENGE
+                result['active_triggered'] = True
+                cv2.destroyAllWindows() # Reset windows for challenge
+                
+                blink_success, blink_msg = self.active_detector.detect_blinks(
+                    num_blinks_required=self.config.BLINKS_REQUIRED,
+                    timeout=self.config.ACTIVE_TIMEOUT
+                )
+                
+                result['active_result'] = blink_msg
+                if blink_success:
+                    result.update({'success': True, 'decision': 'LIVE'})
+                else:
+                    result.update({'success': False, 'decision': 'SPOOF'})
+            
+            return result
             
         finally:
             cap.release()
             cv2.destroyAllWindows()
-        
-        # Final inference
-        if len(face_crops) == 0:
-            print("❌ No faces detected")
-            return {'success': False, 'decision': 'ERROR', 'passive_score': 0.0}
-        
-        print("\n🤖 Running final inference...")
-        stacked = self.frame_processor.process_sequence(face_crops)
-        final_score = self.passive_model.predict(stacked)
-        
-        print(f"✅ Final score: {final_score:.4f}")
-        
-        # Decision
-        result = {
-            'passive_score': final_score,
-            'active_triggered': False,
-            'success': False,
-            'decision': None
-        }
-        
-        if final_score >= self.config.PASSIVE_THRESHOLD:
-            result['success'] = True
-            result['decision'] = 'LIVE'
-            print("✅ RESULT: LIVE")
-        else:
-            print("⚠️  Triggering active liveness (blink detection)...")
-            result['active_triggered'] = True
-            
-            blink_success, blink_msg = self.active_detector.detect_blinks(
-                num_blinks_required=self.config.BLINKS_REQUIRED,
-                timeout=self.config.ACTIVE_TIMEOUT
-            )
-            
-            result['active_result'] = blink_msg
-            
-            if blink_success:
-                result['success'] = True
-                result['decision'] = 'LIVE'
-                print("✅ RESULT: LIVE (via active)")
-            else:
-                result['success'] = False
-                result['decision'] = 'SPOOF'
-                print("❌ RESULT: SPOOF")
-        
-        return result
 
 
 def main():
@@ -317,13 +339,13 @@ def main():
     result = pipeline.run_with_ui()
     
     if result:
-        print("\n" + "="*70)
-        print("FINAL REPORT")
-        print("="*70)
-        print(f"Decision: {result['decision']}")
-        print(f"Score: {result['passive_score']:.4f}")
-        print(f"Status: {'✅ APPROVED' if result['success'] else '❌ REJECTED'}")
-        print("="*70)
+        logger.info("="*70)
+        logger.info("FINAL REPORT")
+        logger.info("="*70)
+        logger.info(f"Decision: {result['decision']}")
+        logger.info(f"Score: {result['passive_score']:.4f}")
+        logger.info(f"Status: {'✅ APPROVED' if result['success'] else '❌ REJECTED'}")
+        logger.info("="*70)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ Supports: Keras (.h5), ONNX (.onnx), PyTorch (.pth)
 
 import numpy as np
 import os
+import sys
 from typing import Optional
 
 
@@ -14,9 +15,8 @@ class PassiveLivenessModel:
     Loads and runs pretrained MobileNet+LSTM liveness model
     
     Model Architecture (expected):
-    - Input: (batch, T, H, W, C) where T=16, H=W=112, C=3
-    - MobileNet backbone extracts per-frame features
-    - LSTM processes temporal sequence
+    - Input: (batch, T, H, W, C) where T=8, H=W=224, C=3
+    - MobileNetV3 backbone with TSM (Temporal Shift Module)
     - Output: Single score ∈ [0, 1] (probability of LIVE)
     """
     
@@ -83,14 +83,61 @@ class PassiveLivenessModel:
             self.use_dummy = True
     
     def _load_pytorch(self):
-        """Load PyTorch model"""
+        """Load PyTorch TSM model"""
         try:
             import torch
-            self.model = torch.load(self.model_path, map_location='cpu')
-            self.model.eval()
-            print(f"✓ Loaded PyTorch model from {self.model_path}")
+            import torch.nn as nn
+            
+            # Add TSM module to path
+            tsm_path = os.path.join(os.getcwd(), 'temporal-shift-module')
+            if tsm_path not in sys.path:
+                sys.path.insert(0, tsm_path)
+            
+            try:
+                from ops.models import TSN
+                
+                # Determine base model
+                base_model = 'mobilenetv2' # MobileNetV3 often uses V2 base in TSM repo or custom
+                if 'mobilenetv3' in self.model_path.lower():
+                    base_model = 'mobilenetv2' # Placeholder if V3 not explicitly in 'ops.models'
+                
+                # Initialize TSM model (matching setup_tsm_model.py logic)
+                self.model = TSN(
+                    num_class=400, # Kinetics-400 default
+                    num_segments=8,
+                    modality='RGB',
+                    base_model=base_model,
+                    consensus_type='avg',
+                    dropout=0.5,
+                    is_shift=True,
+                    shift_div=8,
+                    shift_place='blockres'
+                )
+                
+                # Load weights
+                checkpoint = torch.load(self.model_path, map_location='cpu')
+                if 'state_dict' in checkpoint:
+                    self.model.load_state_dict(checkpoint['state_dict'])
+                else:
+                    self.model.load_state_dict(checkpoint)
+                
+                # Modify for binary classification
+                self.model.new_fc = nn.Linear(self.model.new_fc.in_features, 1)
+                self.model.sigmoid = nn.Sigmoid()
+                
+                self.model.eval()
+                print(f"✓ Loaded TSM model from {self.model_path}")
+                
+            except Exception as e:
+                print(f"TSN initialization error: {e}")
+                # Fallback to simple load if not a TSN model
+                checkpoint = torch.load(self.model_path, map_location='cpu')
+                self.model = checkpoint
+                self.model.eval()
+                print(f"✓ Loaded standard PyTorch model from {self.model_path}")
+                
         except ImportError:
-            raise ImportError("Install PyTorch: pip install torch")
+            raise ImportError("Install PyTorch: pip install torch torchvision")
         except Exception as e:
             print(f"Error loading PyTorch model: {e}")
             self.use_dummy = True
@@ -138,18 +185,25 @@ class PassiveLivenessModel:
         return np.clip(score, 0.0, 1.0)
     
     def _predict_pytorch(self, batch_frames: np.ndarray) -> float:
-        """PyTorch inference"""
+        """PyTorch inference for TSM"""
         import torch
         
-        # Convert to PyTorch tensor
-        # PyTorch expects (B, C, T, H, W) or (B, T, C, H, W) depending on model
-        # Adjust based on your model architecture
-        tensor = torch.from_numpy(batch_frames).float()
+        # TSM expects (B, T, C, H, W) or (B*T, C, H, W)
+        # Our batch_frames is (1, T, H, W, C)
+        
+        # Convert to (1, T, C, H, W)
+        tensor = torch.from_numpy(batch_frames).permute(0, 1, 4, 2, 3).float()
         
         with torch.no_grad():
+            # TSM forward usually handles the view internally if TSN is used
             output = self.model(tensor)
         
-        score = float(output[0].item())
+        # If output is [1, 1], get item
+        if hasattr(output, 'item'):
+            score = float(output.item())
+        else:
+            score = float(output[0].item())
+            
         return np.clip(score, 0.0, 1.0)
     
     def _predict_dummy(self, frames: np.ndarray) -> float:

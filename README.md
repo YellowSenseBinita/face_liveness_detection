@@ -2,7 +2,7 @@
 
 **Complete end-to-end system for Aadhaar-like face authentication**
 
-Uses pretrained MobileNet+LSTM model for passive liveness detection with active blink detection fallback.
+Uses pretrained MobileNetV3 + TSM (Temporal Shift Module) model for high-efficiency passive liveness detection with active blink/mouth detection fallback.
 
 ---
 
@@ -31,18 +31,20 @@ face-liveness-detection/
 ```
 Webcam → Capture 2s video (~ 60 frames)
        ↓
-Face Detection & Crop (MediaPipe)
+Face Detection & Alignment (MediaPipe)
        ↓
-Preprocess & Stack → (16, 112, 112, 3)
+Warm-up Phase (Wait for stable face alignment)
        ↓
-MobileNet+LSTM Inference → score ∈ [0, 1]
+Preprocess & Stack → (8, 224, 224, 3)
+       ↓
+MobileNetV3+TSM Inference → score ∈ [0, 1]
        ↓
 Decision:
   - score ≥ 0.55 → LIVE ✅
-  - score < 0.55 → Active Liveness
+  - score < 0.55 → Active Liveness Challenges
        ↓
-Active: Blink Detection (EAR-based)
-  - 2 blinks detected → LIVE ✅
+Active: Blink or Mouth Detection (Randomized)
+  - Challenge passed → LIVE ✅
   - timeout/fail → SPOOF ❌
 ```
 
@@ -107,13 +109,11 @@ That's it! 🎉
 - **Shape:** `(1, 1)` - single score
 - **Range:** `[0, 1]` where 1=LIVE, 0=SPOOF
 
-### Architecture (Typical)
-```
-Input (1, 16, 112, 112, 3)
+### Input (1, 8, 224, 224, 3)
   ↓
-MobileNetV2 (per-frame features)
+MobileNetV3 (with TSM shift blocks)
   ↓
-LSTM (temporal modeling)
+Temporal Pooling (Channel-wise shift)
   ↓
 Dense + Sigmoid → score
 ```

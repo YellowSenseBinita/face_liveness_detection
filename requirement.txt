@@ -1,6 +1,6 @@
 # Core dependencies (required)
 opencv-python==4.8.1.78
-numpy==1.24.3
+numpy<2.0.0
 mediapipe==0.10.9
 
 # Model inference dependencies (choose based on your model format)
