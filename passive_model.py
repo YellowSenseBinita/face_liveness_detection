@@ -205,14 +205,23 @@ class PassiveLivenessModel:
         tensor = torch.from_numpy(batch_frames).permute(0, 1, 4, 2, 3).float()
         
         with torch.no_grad():
-            # TSM forward usually handles the view internally if TSN is used
             output = self.model(tensor)
-        
-        # If output is [1, 1], get item
-        if hasattr(output, 'item'):
-            score = float(output.item())
+            
+        # TSM models usually return logits. Apply sigmoid if we added it or if needed.
+        if hasattr(self.model, 'sigmoid'):
+            output = self.model.sigmoid(output)
+        elif not getattr(self.model, 'before_softmax', True):
+            # If before_softmax is False, the model might have already applied Softmax/Sigmoid
+            pass
         else:
-            score = float(output[0].item())
+            # Automatic fallback for logits
+            output = torch.sigmoid(output)
+        
+        # Handling the output shape
+        if output.dim() > 1:
+            score = float(output.view(-1)[0].item())
+        else:
+            score = float(output.item())
             
         return np.clip(score, 0.0, 1.0)
     
