@@ -14,8 +14,8 @@ mediapipe==0.10.9
 # onnxruntime==1.16.3
 
 # For PyTorch models (.pth)
-# torch==2.1.0
-# torchvision==0.16.0
+torch==2.1.0
+torchvision==0.16.0
 
 # Optional: Alternative face detectors
 # mtcnn==0.1.1  # Requires tensorflow

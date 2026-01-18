@@ -135,10 +135,17 @@ class PassiveLivenessModel:
                 checkpoint = torch.load(self.model_path, map_location='cpu')
                 
                 if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-                    # If it's a state_dict, we still need the architecture.
-                    # For now, we assume the user might have saved the full model.
+                    # If it's a state_dict, we cannot use it without the model class
                     print("⚠️ State dict detected without architecture definition.")
-                    self.model = checkpoint
+                    print("→ Cannot instantiate TSM model without 'ops.models'. Using dummy model fallback.")
+                    self.use_dummy = True
+                    return
+                elif isinstance(checkpoint, dict):
+                     # Likely just a state dict
+                     print("⚠️ Dictionary checkpoint detected without architecture.")
+                     print("→ Cannot instantiate TSM model. Using dummy model fallback.")
+                     self.use_dummy = True
+                     return
                 else:
                     self.model = checkpoint
                 
